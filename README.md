@@ -189,8 +189,7 @@ skills/
 
 1. 在 `skills/` 下创建目录
 2. 编写 `SKILL.md` 描述技能功能
-3. 编写 `skill-config.yaml` 配置参数
-4. 重启服务自动加载
+3. 重启服务自动加载
 
 ### 添加 MCP 工具
 

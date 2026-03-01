@@ -11,18 +11,21 @@ import asyncio
 
 from app.core.redis_manager import get_state_manager
 from app.agent import AgentManager
+from app.agent.chat_service import ChatService
 from app.api.schemas import OpenAIChatRequest
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
-# 全局 AgentManager 引用（由 main.py 设置）
+# 全局引用（由 main.py 设置）
 _agent_manager: AgentManager | None = None
+_chat_service: ChatService | None = None
 
 
 def set_agent_manager(manager: AgentManager):
     """设置 AgentManager 引用"""
-    global _agent_manager
+    global _agent_manager, _chat_service
     _agent_manager = manager
+    _chat_service = ChatService(manager)
 
 
 # 支持的模型列表
@@ -100,7 +103,7 @@ async def openai_chat_completions(request: OpenAIChatRequest):
         is_first_message = state_manager.get_message_count(session_id) <= 1
         
         try:
-            async for chunk in agent_manager.chat_stream(session_id, user_message):
+            async for chunk in _chat_service.chat_stream(session_id, user_message):
                 if chunk.choices and chunk.choices[0].delta.content:
                     content = chunk.choices[0].delta.content
                     assistant_content += content
@@ -113,7 +116,7 @@ async def openai_chat_completions(request: OpenAIChatRequest):
             # 异步生成标题（仅首条消息）
             if is_first_message:
                 asyncio.create_task(
-                    _generate_and_update_title(agent_manager, state_manager, session_id, user_message, assistant_content)
+                    _generate_and_update_title(_chat_service, state_manager, session_id, user_message, assistant_content)
                 )
             
             # 发送完成信号
@@ -152,7 +155,7 @@ def _update_session_meta(state_manager, session_id: str, user_message: str):
 
 
 async def _generate_and_update_title(
-    agent_manager: AgentManager,
+    chat_service: ChatService,
     state_manager,
     session_id: str,
     user_message: str,
@@ -160,7 +163,7 @@ async def _generate_and_update_title(
 ):
     """异步生成并更新会话标题"""
     try:
-        title = await agent_manager.generate_title(user_message, assistant_content)
+        title = await chat_service.generate_title(user_message, assistant_content)
         state_manager.update_session_title(session_id, title)
         logger.info(f"[Session {session_id}] Title generated: {title}")
     except Exception as e:
