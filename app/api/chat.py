@@ -114,8 +114,8 @@ async def openai_chat_completions(request: OpenAIChatRequest):
                         if data_str:
                             data = json.loads(data_str)
                             # 提取消息内容
-                            if data.get("choices") and data[0].get("delta", {}).get("content"):
-                                assistant_content += data[0]["delta"]["content"]
+                            if data.get("choices") and data["choices"][0].get("delta", {}).get("content"):
+                                assistant_content += data["choices"][0]["delta"]["content"]
                     except json.JSONDecodeError:
                         pass
             
@@ -131,7 +131,7 @@ async def openai_chat_completions(request: OpenAIChatRequest):
                 )
             
         except Exception as e:
-            logger.error(f"Stream error: {e}")
+            import traceback; logger.error(f"Stream error: {e}, type: {type(e)}"); logger.error(f"Traceback: {traceback.format_exc()}")
             yield f"data: {{\"error\": \"{e}\"}}\n\n"
             yield "data: [DONE]\n\n"
     
