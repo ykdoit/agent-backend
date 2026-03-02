@@ -221,26 +221,49 @@ class MCPManager:
             elif tool == "qj_query_contacts":
                 # 查询客户联系人
                 customer_id = params.get("customerId")
+                search_key = params.get("searchKey", "").lower()
                 contacts_map = {
-                    "C001": [
-                        {"id": "P001", "name": "张伟", "title": "技术总监", "phone": "138****1234"},
-                        {"id": "P002", "name": "李娜", "title": "采购经理", "phone": "139****5678"},
+                    "C001": [  # 华为技术有限公司
+                        {"id": "P001-1", "name": "张伟", "title": "技术总监", "phone": "138****1001"},
+                        {"id": "P001-2", "name": "李娜", "title": "采购经理", "phone": "139****1002"},
+                        {"id": "P001-3", "name": "王磊", "title": "产品总监", "phone": "137****1003"},
+                        {"id": "P001-4", "name": "陈静", "title": "商务负责人", "phone": "136****1004"},
+                        {"id": "P001-5", "name": "刘明", "title": "CTO", "phone": "135****1005"},
                     ],
-                    "C002": [
-                        {"id": "P003", "name": "王强", "title": "安全总监", "phone": "137****9012"},
-                        {"id": "P004", "name": "刘洋", "title": "产品经理", "phone": "136****3456"},
+                    "C002": [  # 奇安信科技集团
+                        {"id": "P002-1", "name": "赵强", "title": "安全总监", "phone": "138****2001"},
+                        {"id": "P002-2", "name": "孙洋", "title": "产品经理", "phone": "139****2002"},
+                        {"id": "P002-3", "name": "周婷", "title": "采购总监", "phone": "137****2003"},
+                        {"id": "P002-4", "name": "吴涛", "title": "技术架构师", "phone": "136****2004"},
                     ],
-                    "C003": [
-                        {"id": "P005", "name": "陈明", "title": "CTO", "phone": "135****7890"},
+                    "C003": [  # 阿里巴巴集团
+                        {"id": "P003-1", "name": "陈明", "title": "CTO", "phone": "135****3001"},
+                        {"id": "P003-2", "name": "林燕", "title": "采购经理", "phone": "134****3002"},
+                        {"id": "P003-3", "name": "黄伟", "title": "产品总监", "phone": "133****3003"},
+                        {"id": "P003-4", "name": "郑洁", "title": "商务总监", "phone": "132****3004"},
                     ],
-                    "C004": [
-                        {"id": "P006", "name": "赵琳", "title": "运营总监", "phone": "134****2345"},
+                    "C004": [  # 腾讯科技
+                        {"id": "P004-1", "name": "赵琳", "title": "运营总监", "phone": "134****4001"},
+                        {"id": "P004-2", "name": "钱峰", "title": "技术总监", "phone": "133****4002"},
+                        {"id": "P004-3", "name": "韩雪", "title": "采购经理", "phone": "132****4003"},
                     ],
-                    "C005": [
-                        {"id": "P007", "name": "周杰", "title": "商务负责人", "phone": "133****6789"},
+                    "C005": [  # 字节跳动
+                        {"id": "P005-1", "name": "周杰", "title": "商务负责人", "phone": "133****5001"},
+                        {"id": "P005-2", "name": "吴明", "title": "产品总监", "phone": "132****5002"},
+                        {"id": "P005-3", "name": "徐婷", "title": "采购总监", "phone": "131****5003"},
                     ],
                 }
-                return contacts_map.get(customer_id, [])
+                # 支持按 customerId 或 searchKey 查询
+                if customer_id:
+                    contacts = contacts_map.get(customer_id, [])
+                else:
+                    # 返回所有联系人
+                    contacts = []
+                    for contact_list in contacts_map.values():
+                        contacts.extend(contact_list)
+                if search_key:
+                    contacts = [c for c in contacts if search_key in c["name"].lower()]
+                return contacts
             
             elif tool == "qj_query_sales_phases":
                 # 查询销售阶段
