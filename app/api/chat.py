@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import AsyncGenerator
 import uuid
 import asyncio
+import json
 
 from app.core.redis_manager import get_state_manager
 from app.agent import AgentManager
@@ -98,29 +99,36 @@ async def openai_chat_completions(request: OpenAIChatRequest):
     
     # 流式响应
     async def generate_stream() -> AsyncGenerator[str, None]:
-        chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         assistant_content = ""
         is_first_message = state_manager.get_message_count(session_id) <= 1
         
         try:
-            async for chunk in _chat_service.chat_stream(session_id, user_message):
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    assistant_content += content
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+            async for sse_line in _chat_service.chat_stream(session_id, user_message):
+                # 直接透传 SSE 行
+                yield sse_line
+                
+                # 从 message 事件中提取 content（用于存储）
+                if sse_line.startswith("data: ") and not sse_line.startswith("data: [DONE]"):
+                    try:
+                        data_str = sse_line[6:].strip()
+                        if data_str:
+                            data = json.loads(data_str)
+                            # 提取消息内容
+                            if data.get("choices") and data[0].get("delta", {}).get("content"):
+                                assistant_content += data[0]["delta"]["content"]
+                    except json.JSONDecodeError:
+                        pass
             
             # 存储助手响应
-            state_manager.append_message(session_id, "assistant", assistant_content)
-            logger.info(f"[Session {session_id}] Stored assistant message ({len(assistant_content)} chars)")
+            if assistant_content:
+                state_manager.append_message(session_id, "assistant", assistant_content)
+                logger.info(f"[Session {session_id}] Stored assistant message ({len(assistant_content)} chars)")
             
             # 异步生成标题（仅首条消息）
-            if is_first_message:
+            if is_first_message and assistant_content:
                 asyncio.create_task(
                     _generate_and_update_title(_chat_service, state_manager, session_id, user_message, assistant_content)
                 )
-            
-            # 发送完成信号
-            yield "data: [DONE]\n\n"
             
         except Exception as e:
             logger.error(f"Stream error: {e}")
