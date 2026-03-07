@@ -22,6 +22,7 @@ class SessionResponse(BaseModel):
     updated_at: str
     message_count: int = 0
     user_id: Optional[str] = None
+    pinned: bool = False
 
 
 class MessageResponse(BaseModel):

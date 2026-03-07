@@ -10,6 +10,7 @@ Chat Service - 聊天服务
 不包含：
 - Agent 生命周期管理（由 AgentManager 负责）
 """
+import asyncio
 import json
 import time
 from typing import AsyncGenerator
@@ -29,18 +30,21 @@ if TYPE_CHECKING:
 class ChatService:
     """
     聊天服务
-    
+
     负责处理聊天相关的业务逻辑，包括：
     - 流式聊天响应
     - 历史消息注入
     - 会话标题生成
     - 状态推送（工具调用过程）
     """
-    
+
+    # Agent 执行超时时间（秒）
+    AGENT_TIMEOUT = 300  # 5 分钟
+
     def __init__(self, agent_manager: "AgentManager"):
         """
         初始化聊天服务
-        
+
         Args:
             agent_manager: Agent 管理器实例
         """
@@ -89,35 +93,143 @@ class ChatService:
         try:
             # 发送初始状态
             yield self._create_status_event("thinking", "💭 思考中...")
-            
-            # 使用 AgentScope 官方的流式输出
-            async for msg, last in stream_printing_messages(
-                agents=[agent],
-                coroutine_task=agent(user_msg)
-            ):
-                # 检测工具调用
-                tool_blocks = msg.get_content_blocks("tool_result")
-                for block in tool_blocks:
-                    tool_name = block.get("name", "") if isinstance(block, dict) else ""
-                    if tool_name and tool_name not in tool_calls_seen:
-                        tool_calls_seen.add(tool_name)
-                        yield self._create_status_event("tool_call", f"🔄 调用工具：{tool_name}")
-                        logger.info(f"[{session_id}] Tool call: {tool_name}")
-                
-                # 提取并推送文本内容
-                content = self._extract_content(msg)
-                if content:
-                    new_content = content[len(sent_content):]
-                    if new_content:
-                        sent_content = content
-                        chunk = self._create_chunk(chat_id, new_content, is_first, last)
-                        is_first = False
-                        yield f"data: {chunk.model_dump_json()}\n\n"
-            
-            yield "data: [DONE]\n\n"
-        
+
+            # 创建消息队列
+            queue = asyncio.Queue()
+            agent.set_msg_queue_enabled(True, queue)
+
+            # 启动agent任务（带超时保护）
+            agent_task = asyncio.create_task(agent(user_msg))
+
+            # 超时计时
+            start_time = time.time()
+
+            # 持续监听消息队列
+            while True:
+                # 检查总超时
+                elapsed = time.time() - start_time
+                if elapsed > self.AGENT_TIMEOUT:
+                    logger.warning(f"[{session_id}] Agent execution timeout after {elapsed:.1f}s")
+                    agent_task.cancel()
+                    try:
+                        await agent_task
+                    except asyncio.CancelledError:
+                        pass
+                    error_chunk = self._create_error_chunk(chat_id, "执行超时，请稍后重试", is_first)
+                    yield f"data: {error_chunk.model_dump_json()}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                try:
+                    # 等待消息，超时检查任务是否完成
+                    printing_msg = await asyncio.wait_for(queue.get(), timeout=0.5)
+
+                    # 检查是否是结束信号
+                    if isinstance(printing_msg, str):
+                        continue
+
+                    # 解析消息
+                    try:
+                        msg, last, _ = printing_msg
+                    except (TypeError, ValueError) as e:
+                        logger.warning(f"[{session_id}] Invalid message format: {e}")
+                        continue
+
+                    # 检测工具调用
+                    tool_use_blocks = msg.get_content_blocks("tool_use")
+                    for block in tool_use_blocks:
+                        tool_name = block.get("name", "") if isinstance(block, dict) else ""
+                        if tool_name and tool_name not in tool_calls_seen:
+                            tool_calls_seen.add(tool_name)
+                            yield self._create_status_event("tool_call", f"🔄 调用工具：{tool_name}")
+                            logger.info(f"[{session_id}] Tool call: {tool_name}")
+
+                    # 提取并推送文本内容
+                    content = self._extract_content(msg)
+                    if content:
+                        # 情况1：增量更新（新内容以已发送内容开头）
+                        if len(content) > len(sent_content) and content.startswith(sent_content):
+                            new_content = content[len(sent_content):]
+                            if new_content:
+                                logger.debug(f"[{session_id}] Incremental content: +{len(new_content)} chars")
+                                sent_content = content
+                                chunk = self._create_chunk(chat_id, new_content, is_first)
+                                is_first = False
+                                yield f"data: {chunk.model_dump_json()}\n\n"
+                        # 情况2：内容被完全替换（工具调用后的最终响应）
+                        elif content != sent_content:
+                            logger.info(f"[{session_id}] Content replaced, sending full content ({len(content)} chars)")
+                            sent_content = content
+                            chunk = self._create_chunk(chat_id, content, is_first)
+                            is_first = False
+                            yield f"data: {chunk.model_dump_json()}\n\n"
+                        else:
+                            logger.debug(f"[{session_id}] No new content to send")
+
+                except asyncio.TimeoutError:
+                    # 超时，检查agent任务是否完成或异常
+                    if agent_task.done():
+                        # 检查任务是否有异常
+                        if agent_task.exception():
+                            exc = agent_task.exception()
+                            logger.error(f"[{session_id}] Agent task failed: {exc}")
+                            error_chunk = self._create_error_chunk(chat_id, f"执行失败: {exc}", is_first)
+                            yield f"data: {error_chunk.model_dump_json()}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
+                        # 任务完成，处理剩余消息后退出
+                        while not queue.empty():
+                            try:
+                                printing_msg = queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+
+                            if isinstance(printing_msg, str):
+                                continue
+
+                            try:
+                                msg, last, _ = printing_msg
+                            except (TypeError, ValueError):
+                                continue
+
+                            # 检测工具调用
+                            tool_use_blocks = msg.get_content_blocks("tool_use")
+                            for block in tool_use_blocks:
+                                tool_name = block.get("name", "") if isinstance(block, dict) else ""
+                                if tool_name and tool_name not in tool_calls_seen:
+                                    tool_calls_seen.add(tool_name)
+                                    yield self._create_status_event("tool_call", f"🔄 调用工具：{tool_name}")
+                                    logger.info(f"[{session_id}] Tool call: {tool_name}")
+
+                            # 提取并推送文本内容
+                            content = self._extract_content(msg)
+                            if content and content != sent_content:
+                                # 发送完整内容（可能是工具调用后的最终响应）
+                                logger.info(f"[{session_id}] Final content: {len(content)} chars")
+                                sent_content = content
+                                chunk = self._create_chunk(chat_id, content, is_first)
+                                is_first = False
+                                yield f"data: {chunk.model_dump_json()}\n\n"
+
+                        # 发送最终块（包含 finish_reason）
+                        final_chunk = self._create_final_chunk(chat_id)
+                        yield f"data: {final_chunk.model_dump_json()}\n\n"
+                        logger.info(f"[{session_id}] Agent completed in {time.time() - start_time:.1f}s")
+                        break
+
+                except asyncio.CancelledError:
+                    logger.info(f"[{session_id}] Stream cancelled by client")
+                    agent_task.cancel()
+                    raise
+
+        except asyncio.CancelledError:
+            # 客户端断开连接
+            logger.info(f"[{session_id}] Client disconnected")
+            raise
+
         except Exception as e:
-            logger.error(f"Agent stream error for session {session_id}: {e}")
+            logger.error(f"Agent stream error for session {session_id}: {e}", exc_info=True)
             error_chunk = self._create_error_chunk(chat_id, str(e), is_first)
             yield f"data: {error_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
@@ -160,26 +272,32 @@ class ChatService:
         logger.info(f"Injected {len(history_messages)} history messages for session {session_id}")
     
     def _extract_content(self, msg) -> str | None:
-        """从消息中提取文本内容"""
+        """从消息中提取文本内容，拼接所有 text block"""
         if not hasattr(msg, 'content'):
             return None
-        
+
         content = msg.content
-        
+
         if isinstance(content, str):
             return content
-        
+
         if isinstance(content, list):
+            # 拼接所有 text block，而不是只返回第一个
+            text_parts = []
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
-                    return block.get("text", "")
+                    text = block.get("text", "")
+                    if text:
+                        text_parts.append(text)
                 elif isinstance(block, str):
-                    return block
-        
+                    text_parts.append(block)
+
+            return "".join(text_parts) if text_parts else None
+
         return None
     
-    def _create_chunk(self, chat_id: str, content: str, is_first: bool, is_last: bool) -> ChatCompletionChunk:
-        """创建流式响应块"""
+    def _create_chunk(self, chat_id: str, content: str, is_first: bool) -> ChatCompletionChunk:
+        """创建流式响应块（不包含 finish_reason）"""
         return ChatCompletionChunk(
             id=chat_id,
             object="chat.completion.chunk",
@@ -192,7 +310,26 @@ class ChatService:
                         role="assistant" if is_first else None,
                         content=content,
                     ),
-                    finish_reason="stop" if is_last else None,
+                    finish_reason=None,
+                )
+            ],
+        )
+
+    def _create_final_chunk(self, chat_id: str) -> ChatCompletionChunk:
+        """创建最终响应块（仅包含 finish_reason）"""
+        return ChatCompletionChunk(
+            id=chat_id,
+            object="chat.completion.chunk",
+            created=int(time.time()),
+            model=self._agent_manager._config.llm.model_name,
+            choices=[
+                Choice(
+                    index=0,
+                    delta=ChoiceDelta(
+                        role=None,
+                        content=None,
+                    ),
+                    finish_reason="stop",
                 )
             ],
         )
@@ -230,7 +367,14 @@ class ChatService:
             response = await self._agent_manager._model(
                 messages=[{"role": "user", "content": prompt}],
             )
-            title = response.choices[0].message.content.strip()
+            
+            # ChatResponse.content 是 TextBlock 列表，需要提取 text 字段
+            title = ""
+            for block in response.content:
+                if block.get("type") == "text":
+                    title += block.get("text", "")
+            
+            title = title.strip()
             
             if len(title) > 15:
                 title = title[:15] + "..."

@@ -31,13 +31,14 @@ async def create_session(request: CreateSessionRequest):
     
     # 创建会话到 Redis
     state_manager.create_session(session_id, request.user_id)
-    
+
     # 更新会话元数据
     session_key = f"SESSION_META:{session_id}"
     session_meta = {
         "title": request.title or "新对话",
         "created_at": now,
-        "updated_at": now
+        "updated_at": now,
+        "pinned": "0"
     }
     
     # 使用 Redis hash 存储会话元数据
@@ -94,11 +95,13 @@ async def list_sessions(
                     "title": meta.get("title", "新对话"),
                     "created_at": meta.get("created_at", ""),
                     "updated_at": meta.get("updated_at", ""),
-                    "message_count": message_count
+                    "message_count": message_count,
+                    "pinned": meta.get("pinned") == "1"
                 })
-    
-    # 排序（按更新时间倒序）
-    sessions.sort(key=lambda x: x["updated_at"], reverse=True)
+
+    # 排序（置顶优先，然后按更新时间倒序）
+    sessions.sort(key=lambda x: (not x["pinned"], x["updated_at"]), reverse=False)
+    sessions.sort(key=lambda x: x["pinned"], reverse=True)
     
     # 分页
     total = len(sessions)
@@ -113,7 +116,8 @@ async def list_sessions(
             title=s["title"],
             created_at=s["created_at"],
             updated_at=s["updated_at"],
-            message_count=s["message_count"]
+            message_count=s["message_count"],
+            pinned=s.get("pinned", False)
         )
         for s in sessions_page
     ]
@@ -196,39 +200,46 @@ async def delete_session(session_id: str):
 
 
 @router.patch("/{session_id}", response_model=SessionResponse)
-async def update_session(session_id: str, title: str = None):
+async def update_session(
+    session_id: str,
+    title: Optional[str] = Query(None),
+    pinned: Optional[bool] = Query(None)
+):
     """
     更新会话
-    
-    更新会话标题等信息
+
+    更新会话标题、置顶状态等信息
     """
     state_manager = get_state_manager()
-    
+
     # 检查会话是否存在
     session_data = state_manager.get_session(session_id)
     if not session_data:
         return {"error": "Session not found"}
-    
+
     # 更新会话元数据
     session_key = f"SESSION_META:{session_id}"
     if state_manager.redis_client:
         if title:
             state_manager.redis_client.hset(session_key, "title", title)
+        if pinned is not None:
+            state_manager.redis_client.hset(session_key, "pinned", "1" if pinned else "0")
         state_manager.redis_client.hset(session_key, "updated_at", datetime.now().isoformat())
-        
+
         # 获取更新后的元数据
         meta = state_manager.redis_client.hgetall(session_key)
-        
+
         # 获取消息数量
         dialog_key = f"DIALOG_HISTORY:{session_id}"
         message_count = state_manager.redis_client.llen(dialog_key)
-        
+
         return SessionResponse(
             session_id=session_id,
             title=meta.get("title", "新对话"),
             created_at=meta.get("created_at", ""),
             updated_at=meta.get("updated_at", ""),
-            message_count=message_count
+            message_count=message_count,
+            pinned=meta.get("pinned") == "1"
         )
-    
+
     return {"error": "Redis not available"}
