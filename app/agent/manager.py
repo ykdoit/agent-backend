@@ -156,13 +156,18 @@ class AgentManager:
             self._agents.pop(session_id, None)
 
 async def get_agent_manager() -> AgentManager:
-    """获取 AgentManager 单例实例"""
-    global _agent_manager
+    """获取 AgentManager 单例实例（double-checked locking）"""
+    global _agent_manager, _agent_manager_lock
+    if _agent_manager_lock is None:
+        _agent_manager_lock = asyncio.Lock()
     if _agent_manager is None:
-        _agent_manager = AgentManager()
-        await _agent_manager.initialize()
+        async with _agent_manager_lock:
+            if _agent_manager is None:
+                _agent_manager = AgentManager()
+                await _agent_manager.initialize()
     return _agent_manager
 
 
 # 全局实例
 _agent_manager: AgentManager | None = None
+_agent_manager_lock: asyncio.Lock | None = None
