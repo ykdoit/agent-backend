@@ -6,6 +6,7 @@ API接口说明：
 - 对话接口: OpenAI 兼容的流式接口 (/v1/chat/completions)
 - 健康检查: 根路由、健康状态
 """
+import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -31,10 +32,10 @@ async def lifespan(app: FastAPI):
     
     # 初始化 Redis 状态管理器
     state_manager = get_state_manager()
-    if state_manager.health_check():
-        logger.info("Redis state manager initialized successfully")
-    else:
-        logger.warning("Redis connection failed, using fallback mode")
+    if not state_manager.health_check():
+        logger.error("Redis unavailable — cannot start. Check host/port in config.yml or start Redis.")
+        sys.exit(1)
+    logger.info("Redis state manager initialized successfully")
     
     # 初始化 AgentManager
     _agent_manager = await get_agent_manager()
