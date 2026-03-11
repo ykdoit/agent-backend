@@ -49,11 +49,12 @@ class AgentManager:
         agentscope.init(project="agent-service", logging_level="INFO")
 
         llm = self._config.llm
-        # Prepare client_kwargs with SSL verification disabled for local HTTPS
+        # Prepare client_kwargs with SSL verification enabled by default
         # Increase timeout to 120s for slow LLM responses
+        _verify_ssl = os.getenv("VERIFY_SSL", "true").lower() != "false"
         client_kwargs = {
             "base_url": llm.base_url,
-            "http_client": httpx.AsyncClient(verify=False, timeout=httpx.Timeout(120.0)),
+            "http_client": httpx.AsyncClient(verify=_verify_ssl, timeout=httpx.Timeout(120.0)),
         }
         self._model = OpenAIChatModel(
             model_name=llm.model_name,
