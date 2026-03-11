@@ -158,9 +158,9 @@ class AgentManager:
 async def get_agent_manager() -> AgentManager:
     """获取 AgentManager 单例实例（double-checked locking）"""
     global _agent_manager, _agent_manager_lock
-    if _agent_manager_lock is None:
-        _agent_manager_lock = asyncio.Lock()
     if _agent_manager is None:
+        if _agent_manager_lock is None:
+            _agent_manager_lock = asyncio.Lock()
         async with _agent_manager_lock:
             if _agent_manager is None:
                 _agent_manager = AgentManager()
