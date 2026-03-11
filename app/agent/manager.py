@@ -5,7 +5,6 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime
 from typing import Any
 
 import httpx
@@ -134,20 +133,7 @@ class AgentManager:
                 # 输出提示词信息
                 logger.info(f"Creating agent for session {session_id}")
                 logger.info(f"System prompt length: {len(sys_prompt)} chars (~{len(sys_prompt)//4} tokens)")
-                
-                # 打印完整提示词到文件
-                prompt_file = f"/tmp/prompt_{session_id[:8]}.txt"
-                with open(prompt_file, "w", encoding="utf-8") as f:
-                    f.write(f"# System Prompt for Session: {session_id}\n")
-                    f.write(f"# Staff: {staff_domain or STAFF_DOMAIN}\n")
-                    f.write(f"# Length: {len(sys_prompt)} chars (~{len(sys_prompt)//4} tokens)\n")
-                    f.write(f"# Time: {datetime.now().isoformat()}\n")
-                    f.write("\n" + "="*80 + "\n")
-                    f.write("FULL SYSTEM PROMPT:\n")
-                    f.write("="*80 + "\n\n")
-                    f.write(sys_prompt)
-                logger.info(f"Full system prompt saved to: {prompt_file}")
-                
+
                 # 同时在日志中输出完整提示词（可选，设置环境变量 DEBUG_PROMPT=1 启用）
                 if os.getenv("DEBUG_PROMPT"):
                     logger.info(f"\n{'='*80}\nFULL SYSTEM PROMPT:\n{'='*80}\n{sys_prompt}\n{'='*80}")
