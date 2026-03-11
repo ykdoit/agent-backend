@@ -1,8 +1,9 @@
 """
 会话管理 API
 """
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
+from app.core.limiter import limiter
 from loguru import logger
 from datetime import datetime
 from typing import Optional
@@ -19,23 +20,24 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
 
 @router.post("", response_model=SessionResponse)
-async def create_session(request: CreateSessionRequest):
+@limiter.limit("30/minute")
+async def create_session(request: Request, body: CreateSessionRequest):
     """
     创建新会话
-    
+
     创建一个新的对话会话，用于管理多轮对话
     """
     state_manager = get_state_manager()
     session_id = str(uuid.uuid4())
     now = datetime.now().isoformat()
-    
+
     # 创建会话到 Redis
-    state_manager.create_session(session_id, request.user_id)
+    state_manager.create_session(session_id, body.user_id)
 
     # 更新会话元数据
     session_key = f"SESSION_META:{session_id}"
     session_meta = {
-        "title": request.title or "新对话",
+        "title": body.title or "新对话",
         "created_at": now,
         "updated_at": now,
         "pinned": "0"

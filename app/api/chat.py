@@ -1,8 +1,9 @@
 """
 OpenAI 兼容聊天 API
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
+from app.core.limiter import limiter
 from loguru import logger
 from datetime import datetime
 from typing import AsyncGenerator
@@ -59,7 +60,8 @@ async def get_model(model_id: str):
 
 
 @router.post("/chat/completions")
-async def openai_chat_completions(request: OpenAIChatRequest):
+@limiter.limit("10/minute")
+async def openai_chat_completions(request: Request, body: OpenAIChatRequest):
     """
     OpenAI 兼容流式接口
     
@@ -70,22 +72,22 @@ async def openai_chat_completions(request: OpenAIChatRequest):
     agent_manager = _agent_manager
     if agent_manager is None:
         raise RuntimeError("AgentManager not initialized")
-    
+
     state_manager = get_state_manager()
-    
+
     # 提取用户消息
-    user_message = request.message
-    if not user_message and request.messages:
-        for msg in reversed(request.messages):
+    user_message = body.message
+    if not user_message and body.messages:
+        for msg in reversed(body.messages):
             if msg.role == "user":
                 user_message = msg.content
                 break
-    
+
     if not user_message:
         user_message = "请输入消息"
-    
+
     # 生成或使用现有 session_id
-    session_id = request.session_id or f"conv_{uuid.uuid4().hex[:12]}"
+    session_id = body.session_id or f"conv_{uuid.uuid4().hex[:12]}"
     
     # 确保会话存在
     if not state_manager.get_session(session_id):

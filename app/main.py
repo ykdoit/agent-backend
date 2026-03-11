@@ -7,10 +7,15 @@ API接口说明：
 - 健康检查: 根路由、健康状态
 """
 import sys
-from fastapi import FastAPI
+import uuid
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from contextlib import asynccontextmanager
 from loguru import logger
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from app.core.limiter import limiter
 
 from app.config import get_settings
 from app.agent import get_agent_manager, AgentManager
@@ -59,6 +64,18 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Rate limiter setup
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Request ID middleware
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    response: Response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 # CORS
 settings = get_settings()
