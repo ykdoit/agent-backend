@@ -48,6 +48,31 @@ class SessionListResponse(BaseModel):
     total: int
 
 
+# ============== Search Models ==============
+
+class SearchMessageSnippet(BaseModel):
+    """搜索消息片段"""
+    role: str
+    snippet: str
+    timestamp: str
+
+
+class SearchSessionResult(BaseModel):
+    """搜索会话结果"""
+    session_id: str
+    title: str
+    updated_at: str
+    matched_messages: List[SearchMessageSnippet]
+
+
+class SearchResponse(BaseModel):
+    """搜索响应"""
+    results: List[SearchSessionResult]
+    total: int
+    query: str
+    truncated: bool = False
+
+
 # ============== OpenAI Compatible Models ==============
 
 class OpenAIMessage(BaseModel):

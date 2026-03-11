@@ -14,7 +14,12 @@ from app.api.schemas import (
     CreateSessionRequest,
     SessionResponse,
     SessionListResponse,
+    SearchMessageSnippet,
+    SearchSessionResult,
+    SearchResponse,
 )
+import time
+import json
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
@@ -127,6 +132,136 @@ async def list_sessions(
     return SessionListResponse(
         sessions=session_responses,
         total=total
+    )
+
+
+@router.get("/search", response_model=SearchResponse)
+async def search_sessions(
+    q: str = Query(..., min_length=1, description="Search query"),
+    user_id: Optional[str] = None
+):
+    """
+    搜索会话
+    
+    搜索会话标题和消息内容，返回匹配的会话及消息片段
+    """
+    state_manager = get_state_manager()
+    start_time = time.time()
+    timeout = 3.0  # 3秒超时
+    truncated = False
+    results = []
+    keyword = q.lower()
+    
+    if not state_manager.redis_client:
+        return SearchResponse(
+            results=[],
+            total=0,
+            query=q,
+            truncated=False
+        )
+    
+    # 使用 SCAN 命令分批扫描 SESSION_META:* 键
+    cursor = 0
+    session_ids = []
+    
+    while True:
+        cursor, keys = state_manager.redis_client.scan(
+            cursor=cursor,
+            match="SESSION_META:*",
+            count=100
+        )
+        session_ids.extend([key.split(":")[-1] for key in keys])
+        
+        # 如果超时或扫描完成，退出
+        if cursor == 0 or time.time() - start_time > timeout:
+            if cursor != 0:
+                truncated = True
+            break
+    
+    # 搜索每个会话
+    for session_id in session_ids:
+        # 检查是否超时
+        if time.time() - start_time > timeout:
+            truncated = True
+            break
+        
+        # 获取会话元数据
+        session_key = f"SESSION_META:{session_id}"
+        meta = state_manager.redis_client.hgetall(session_key)
+        title = meta.get("title", "新对话")
+        updated_at = meta.get("updated_at", "")
+        
+        # 检查标题匹配
+        title_matched = keyword in title.lower()
+        matched_messages = []
+        
+        # 扫描消息历史
+        dialog_key = f"DIALOG_HISTORY:{session_id}"
+        messages = state_manager.redis_client.lrange(dialog_key, 0, -1)
+        
+        for msg_json in messages:
+            # 检查是否超时
+            if time.time() - start_time > timeout:
+                truncated = True
+                break
+            
+            try:
+                msg = json.loads(msg_json)
+                content = msg.get("content", "")
+                role = msg.get("role", "")
+                timestamp = msg.get("timestamp", "")
+                
+                # 检查内容匹配
+                if keyword in content.lower():
+                    # 提取片段（60字符前后）
+                    idx = content.lower().find(keyword)
+                    start_idx = max(0, idx - 60)
+                    end_idx = min(len(content), idx + len(keyword) + 60)
+                    snippet = content[start_idx:end_idx]
+                    
+                    # 如果不是从头开始，添加省略号
+                    if start_idx > 0:
+                        snippet = "..." + snippet
+                    if end_idx < len(content):
+                        snippet = snippet + "..."
+                    
+                    matched_messages.append(
+                        SearchMessageSnippet(
+                            role=role,
+                            snippet=snippet,
+                            timestamp=timestamp
+                        )
+                    )
+                    
+                    # 最多2个片段
+                    if len(matched_messages) >= 2:
+                        break
+            except (json.JSONDecodeError, Exception):
+                continue
+        
+        # 如果有匹配（标题或内容），添加到结果
+        if title_matched or matched_messages:
+            results.append(
+                SearchSessionResult(
+                    session_id=session_id,
+                    title=title,
+                    updated_at=updated_at,
+                    matched_messages=matched_messages
+                )
+            )
+        
+        # 最多20个结果
+        if len(results) >= 20:
+            break
+    
+    # 按 updated_at 降序排序
+    results.sort(key=lambda x: x.updated_at, reverse=True)
+    
+    return SearchResponse(
+        results=results,
+        total=len(results),
+        query=q,
+        truncated=truncated
     )
 
 
