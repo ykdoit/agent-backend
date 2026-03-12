@@ -54,29 +54,34 @@ class ChatService:
         self,
         session_id: str,
         user_message: str,
+        model: str | None = None,
         user_context: dict[str, str | None] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式聊天（带状态推送）
-        
+
         使用 AgentScope 官方的 stream_printing_messages 实现真正的流式输出。
         同时监控工具调用，推送状态事件。
-        
+
         Args:
             session_id: 会话 ID
             user_message: 当前用户消息
+            model: 模型 ID (如 glm-5, glm-4.7)
             user_context: 可选的用户上下文（user_id, user_name 等）
-        
+
         Yields:
             SSE 格式字符串 (data: {...})
         """
         from app.core.redis_manager import get_state_manager
-        
+
         if not user_message:
             return
-        
-        # 获取或创建 Agent
-        agent = await self._agent_manager.get_or_create_agent(session_id, user_context)
+
+        # 确定实际使用的模型 ID
+        actual_model = model or self._agent_manager._config.llm.model_name
+
+        # 获取或创建 Agent (传入 model_id)
+        agent = await self._agent_manager.get_or_create_agent(session_id, user_context, actual_model)
         
         # 注入历史消息到 agent memory
         await self._inject_history(agent, session_id)
@@ -115,7 +120,7 @@ class ChatService:
                         await agent_task
                     except asyncio.CancelledError:
                         pass
-                    error_chunk = self._create_error_chunk(chat_id, "执行超时，请稍后重试", is_first)
+                    error_chunk = self._create_error_chunk(chat_id, "执行超时，请稍后重试", is_first, actual_model)
                     yield f"data: {error_chunk.model_dump_json()}\n\n"
                     yield "data: [DONE]\n\n"
                     return
@@ -153,14 +158,14 @@ class ChatService:
                             if new_content:
                                 logger.debug(f"[{session_id}] Incremental content: +{len(new_content)} chars")
                                 sent_content = content
-                                chunk = self._create_chunk(chat_id, new_content, is_first)
+                                chunk = self._create_chunk(chat_id, new_content, is_first, actual_model)
                                 is_first = False
                                 yield f"data: {chunk.model_dump_json()}\n\n"
                         # 情况2：内容被完全替换（工具调用后的最终响应）
                         elif content != sent_content:
                             logger.info(f"[{session_id}] Content replaced, sending full content ({len(content)} chars)")
                             sent_content = content
-                            chunk = self._create_chunk(chat_id, content, is_first)
+                            chunk = self._create_chunk(chat_id, content, is_first, actual_model)
                             is_first = False
                             yield f"data: {chunk.model_dump_json()}\n\n"
                         else:
@@ -173,7 +178,7 @@ class ChatService:
                         if agent_task.exception():
                             exc = agent_task.exception()
                             logger.error(f"[{session_id}] Agent task failed: {exc}")
-                            error_chunk = self._create_error_chunk(chat_id, f"执行失败: {exc}", is_first)
+                            error_chunk = self._create_error_chunk(chat_id, f"执行失败: {exc}", is_first, actual_model)
                             yield f"data: {error_chunk.model_dump_json()}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -208,12 +213,12 @@ class ChatService:
                                 # 发送完整内容（可能是工具调用后的最终响应）
                                 logger.info(f"[{session_id}] Final content: {len(content)} chars")
                                 sent_content = content
-                                chunk = self._create_chunk(chat_id, content, is_first)
+                                chunk = self._create_chunk(chat_id, content, is_first, actual_model)
                                 is_first = False
                                 yield f"data: {chunk.model_dump_json()}\n\n"
 
                         # 发送最终块（包含 finish_reason）
-                        final_chunk = self._create_final_chunk(chat_id)
+                        final_chunk = self._create_final_chunk(chat_id, actual_model)
                         yield f"data: {final_chunk.model_dump_json()}\n\n"
                         logger.info(f"[{session_id}] Agent completed in {time.time() - start_time:.1f}s")
                         break
@@ -233,7 +238,7 @@ class ChatService:
 
         except Exception as e:
             logger.error(f"Agent stream error for session {session_id}: {e}", exc_info=True)
-            error_chunk = self._create_error_chunk(chat_id, str(e), is_first)
+            error_chunk = self._create_error_chunk(chat_id, str(e), is_first, actual_model)
             yield f"data: {error_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
     
@@ -350,13 +355,13 @@ class ChatService:
 
         return None
     
-    def _create_chunk(self, chat_id: str, content: str, is_first: bool) -> ChatCompletionChunk:
+    def _create_chunk(self, chat_id: str, content: str, is_first: bool, model: str) -> ChatCompletionChunk:
         """创建流式响应块（不包含 finish_reason）"""
         return ChatCompletionChunk(
             id=chat_id,
             object="chat.completion.chunk",
             created=int(time.time()),
-            model=self._agent_manager._config.llm.model_name,
+            model=model,
             choices=[
                 Choice(
                     index=0,
@@ -369,13 +374,13 @@ class ChatService:
             ],
         )
 
-    def _create_final_chunk(self, chat_id: str) -> ChatCompletionChunk:
+    def _create_final_chunk(self, chat_id: str, model: str) -> ChatCompletionChunk:
         """创建最终响应块（仅包含 finish_reason）"""
         return ChatCompletionChunk(
             id=chat_id,
             object="chat.completion.chunk",
             created=int(time.time()),
-            model=self._agent_manager._config.llm.model_name,
+            model=model,
             choices=[
                 Choice(
                     index=0,
@@ -388,13 +393,13 @@ class ChatService:
             ],
         )
     
-    def _create_error_chunk(self, chat_id: str, error_message: str, is_first: bool) -> ChatCompletionChunk:
+    def _create_error_chunk(self, chat_id: str, error_message: str, is_first: bool, model: str) -> ChatCompletionChunk:
         """创建错误响应块"""
         return ChatCompletionChunk(
             id=chat_id,
             object="chat.completion.chunk",
             created=int(time.time()),
-            model=self._agent_manager._config.llm.model_name,
+            model=model,
             choices=[
                 Choice(
                     index=0,

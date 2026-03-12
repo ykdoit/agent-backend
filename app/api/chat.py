@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from app.core.limiter import limiter
 from loguru import logger
 from datetime import datetime
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Dict, Any
 import uuid
 import asyncio
 import json
@@ -15,6 +15,7 @@ from app.core.redis_manager import get_state_manager
 from app.agent import AgentManager
 from app.agent.chat_service import ChatService
 from app.api.schemas import OpenAIChatRequest
+from app.config import load_yaml_config
 
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatible"])
 
@@ -30,18 +31,44 @@ def set_agent_manager(manager: AgentManager):
     _chat_service = ChatService(manager)
 
 
-# 支持的模型列表
-AVAILABLE_MODELS = [
-    {
-        "id": "Pro/zai-org/GLM-4.7",
-        "object": "model",
-        "created": 1700000000,
-        "owned_by": "zai-org",
-        "permission": [],
-        "root": "GLM-4.7",
-        "parent": None,
-    }
-]
+def _load_available_models() -> List[Dict[str, Any]]:
+    """从配置文件加载可用模型列表"""
+    yaml_config = load_yaml_config()
+    models_config = yaml_config.get("available_models", [])
+
+    if not models_config:
+        # 兼容：如果没有配置，返回默认模型
+        return [{
+            "id": "glm-5",
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "zai-org",
+            "permission": [],
+            "root": "GLM-5",
+            "parent": None,
+            "context": 204800,
+            "output": 131072,
+        }]
+
+    # 转换为 OpenAI 格式
+    return [
+        {
+            "id": model["id"],
+            "object": "model",
+            "created": 1700000000,
+            "owned_by": "zai-org",
+            "permission": [],
+            "root": model["name"],
+            "parent": None,
+            "context": model.get("context", 204800),
+            "output": model.get("output", 131072),
+        }
+        for model in models_config
+    ]
+
+
+# 支持的模型列表（从配置动态加载）
+AVAILABLE_MODELS = _load_available_models()
 
 
 @router.get("/models")
@@ -75,8 +102,9 @@ async def openai_chat_completions(request: Request, body: OpenAIChatRequest):
 
     state_manager = get_state_manager()
 
-    # 提取用户消息
+    # 提取用户消息和模型
     user_message = body.message
+    model = body.model  # 接收前端传来的模型 ID
     if not user_message and body.messages:
         for msg in reversed(body.messages):
             if msg.role == "user":
@@ -116,7 +144,7 @@ async def openai_chat_completions(request: Request, body: OpenAIChatRequest):
         disconnect_task = asyncio.create_task(_watch_disconnect())
 
         try:
-            async for sse_line in _chat_service.chat_stream(session_id, user_message):
+            async for sse_line in _chat_service.chat_stream(session_id, user_message, model):
                 # 先解析 content（在 yield 前），保证 _state["content"] 始终最新
                 if sse_line.startswith("data: ") and not sse_line.startswith("data: [DONE]"):
                     try:
