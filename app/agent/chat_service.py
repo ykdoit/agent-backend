@@ -218,13 +218,16 @@ class ChatService:
                         logger.info(f"[{session_id}] Agent completed in {time.time() - start_time:.1f}s")
                         break
 
-                except asyncio.CancelledError:
-                    logger.info(f"[{session_id}] Stream cancelled by client")
-                    agent_task.cancel()
+                except (asyncio.CancelledError, GeneratorExit) as e:
+                    # 客户端断开：不 cancel agent_task，后台跑完并保存
+                    logger.info(f"[{session_id}] Stream interrupted ({type(e).__name__}), scheduling background save")
+                    asyncio.create_task(
+                        self._background_save(agent_task, session_id, sent_content, queue)
+                    )
                     raise
 
         except asyncio.CancelledError:
-            # 客户端断开连接
+            # 客户端断开连接（内层已处理）
             logger.info(f"[{session_id}] Client disconnected")
             raise
 
@@ -234,6 +237,57 @@ class ChatService:
             yield f"data: {error_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
     
+    async def _background_save(
+        self,
+        agent_task: asyncio.Task,
+        session_id: str,
+        current_content: str,
+        queue: asyncio.Queue,
+    ) -> None:
+        """
+        客户端断开后，后台等待 agent 跑完并保存完整结果到 Redis。
+
+        避免用户切换会话时 AI 回复丢失的问题。
+        """
+        from app.core.redis_manager import get_state_manager
+        state_manager = get_state_manager()
+
+        final_content = current_content
+        try:
+            # 等待 agent 完成（最多 5 分钟）
+            await asyncio.wait_for(asyncio.shield(agent_task), timeout=self.AGENT_TIMEOUT)
+            logger.info(f"[{session_id}] Background agent completed")
+        except asyncio.TimeoutError:
+            logger.warning(f"[{session_id}] Background agent timeout, saving what we have")
+            agent_task.cancel()
+        except Exception as e:
+            logger.error(f"[{session_id}] Background agent error: {e}")
+
+        # 排干队列，拿最新（最完整）的内容
+        while not queue.empty():
+            try:
+                printing_msg = queue.get_nowait()
+                if isinstance(printing_msg, str):
+                    continue
+                try:
+                    msg, _, _ = printing_msg
+                    content = self._extract_content(msg)
+                    if content and len(content) > len(final_content):
+                        final_content = content
+                except (TypeError, ValueError):
+                    pass
+            except asyncio.QueueEmpty:
+                break
+
+        if final_content:
+            state_manager.append_message(session_id, "assistant", final_content)
+            logger.info(f"[{session_id}] Background save: {len(final_content)} chars")
+            # 推送 WebSocket 通知，前端立即刷新（无需轮询）
+            from app.api.websocket import ws_manager
+            await ws_manager.notify_session_updated(session_id)
+        else:
+            logger.info(f"[{session_id}] Background save: no content to save")
+
     def _create_status_event(self, stage: str, text: str) -> str:
         """
         创建状态事件

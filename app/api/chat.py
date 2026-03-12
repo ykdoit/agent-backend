@@ -99,43 +99,56 @@ async def openai_chat_completions(request: Request, body: OpenAIChatRequest):
     # 更新会话元数据
     _update_session_meta(state_manager, session_id, user_message)
     
+    # 用于跟踪已生成内容（_background_save 也会用到）
+    _state = {"content": "", "saved": False}
+
+    async def _watch_disconnect():
+        """后台轮询客户端是否断开（仅日志，saving 由 _background_save 负责）"""
+        while not await request.is_disconnected():
+            await asyncio.sleep(0.5)
+        logger.info(f"[Session {session_id}] Client disconnect detected by watcher, content_len={len(_state['content'])}")
+
     # 流式响应
     async def generate_stream() -> AsyncGenerator[str, None]:
-        assistant_content = ""
         is_first_message = state_manager.get_message_count(session_id) <= 1
-        
+
+        # 启动断连监控任务
+        disconnect_task = asyncio.create_task(_watch_disconnect())
+
         try:
             async for sse_line in _chat_service.chat_stream(session_id, user_message):
-                # 直接透传 SSE 行
-                yield sse_line
-                
-                # 从 message 事件中提取 content（用于存储）
+                # 先解析 content（在 yield 前），保证 _state["content"] 始终最新
                 if sse_line.startswith("data: ") and not sse_line.startswith("data: [DONE]"):
                     try:
                         data_str = sse_line[6:].strip()
                         if data_str:
                             data = json.loads(data_str)
-                            # 提取消息内容
                             if data.get("choices") and data["choices"][0].get("delta", {}).get("content"):
-                                assistant_content += data["choices"][0]["delta"]["content"]
+                                _state["content"] += data["choices"][0]["delta"]["content"]
                     except json.JSONDecodeError:
                         pass
-            
-            # 存储助手响应
-            if assistant_content:
-                state_manager.append_message(session_id, "assistant", assistant_content)
-                logger.info(f"[Session {session_id}] Stored assistant message ({len(assistant_content)} chars)")
-            
+
+                yield sse_line
+
+            # 流正常结束，存储完整助手响应
+            if _state["content"] and not _state["saved"]:
+                state_manager.append_message(session_id, "assistant", _state["content"])
+                _state["saved"] = True
+                logger.info(f"[Session {session_id}] Stored assistant message ({len(_state['content'])} chars)")
+
             # 异步生成标题（仅首条消息）
-            if is_first_message and assistant_content:
+            if is_first_message and _state["content"]:
                 asyncio.create_task(
-                    _generate_and_update_title(_chat_service, state_manager, session_id, user_message, assistant_content)
+                    _generate_and_update_title(_chat_service, state_manager, session_id, user_message, _state["content"])
                 )
-            
+
         except Exception as e:
+            _state["saved"] = True  # 异常路径不让断连监控重复保存
             import traceback; logger.error(f"Stream error: {e}, type: {type(e)}"); logger.error(f"Traceback: {traceback.format_exc()}")
             yield f"data: {{\"error\": \"{e}\"}}\n\n"
             yield "data: [DONE]\n\n"
+        finally:
+            disconnect_task.cancel()  # 正常结束时取消监控任务
     
     return StreamingResponse(
         generate_stream(),

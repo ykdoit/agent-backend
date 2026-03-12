@@ -20,7 +20,7 @@ from app.core.limiter import limiter
 from app.config import get_settings
 from app.agent import get_agent_manager, AgentManager
 from app.core.redis_manager import get_state_manager
-from app.api import sessions_router, chat_router, health_router
+from app.api import sessions_router, chat_router, health_router, ws_router
 from app.api.health import set_agent_manager as health_set_agent_manager
 from app.api.chat import set_agent_manager as chat_set_agent_manager
 
@@ -92,6 +92,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(sessions_router)
 app.include_router(chat_router)
+app.include_router(ws_router)
 
 
 # ============== 启动入口 ==============
