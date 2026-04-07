@@ -21,6 +21,7 @@ aiohttp>=3.10.0
 dateparser>=1.2.0
 redis>=5.0.0
 slowapi>=0.1.9
+ddgs>=8.0.0
 
 # Logging
 loguru>=0.7.0

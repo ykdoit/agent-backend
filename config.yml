@@ -3,7 +3,7 @@
 
 # 默认模型配置 (OpenAI兼容API)
 default_model:
-  model_name: glm-5
+  model_name: glm-4.7-flashx
   base_url: https://api.z.ai/api/coding/paas/v4
   # api_key 从环境变量 LLM_API_KEY 读取
   generate_args:
